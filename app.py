@@ -6,6 +6,7 @@ import requests
 import base64
 import json
 import os
+import re
 
 load_dotenv()
 
@@ -17,7 +18,20 @@ client = Groq(api_key=GROQ_API_KEY)
 
 def image_url_to_base64(image_url):
     response = requests.get(image_url)
+    response.raise_for_status()
     return base64.b64encode(response.content).decode("utf-8")
+
+def extract_json(text):
+    """Extract the first valid JSON object found in the model's response."""
+    cleaned = text.replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if match:
+        return json.loads(match.group(0))
+    raise ValueError(f"Could not extract JSON from model response: {text[:300]}")
 
 @app.route("/", methods=["GET"])
 def home():
@@ -30,14 +44,18 @@ def detect_disease():
         image_url = data.get("image_url")
         crop_type = data.get("crop_type", "Unknown")
 
+        if not image_url:
+            return jsonify({"success": False, "error": "image_url is required"}), 400
+
         print(f"Analyzing {crop_type} crop image...")
 
-        # Convert image to base64
         image_base64 = image_url_to_base64(image_url)
 
-        prompt = f"""You are an expert agricultural scientist analyzing a {crop_type} crop image.
+        prompt = f"""You are an expert agricultural scientist analyzing a photo of a {crop_type} crop leaf/plant.
 
-Identify any disease and respond ONLY in this exact JSON format, no extra text:
+Carefully examine the actual visual symptoms in the image (leaf spots, discoloration, wilting, powdery patches, holes, etc.) before deciding.
+
+Respond ONLY with a single JSON object in exactly this format, no extra text, no markdown:
 {{
   "disease": "disease name or No Disease Found",
   "confidence": 85,
@@ -66,58 +84,42 @@ Identify any disease and respond ONLY in this exact JSON format, no extra text:
                 }
             ],
             max_tokens=1000,
+            temperature=0.2,
         )
 
         text = response.choices[0].message.content.strip()
-        print(f"Groq response: {text}")
+        print(f"Groq raw response: {text}")
 
-        clean = text.replace("```json", "").replace("```", "").strip()
-        parsed = json.loads(clean)
+        parsed = extract_json(text)
+
+        required_keys = {"disease", "confidence", "severity", "treatment", "prevention"}
+        if not required_keys.issubset(parsed.keys()):
+            raise ValueError(f"Model response missing required fields: {parsed}")
 
         return jsonify({"success": True, **parsed})
 
-    except json.JSONDecodeError as e:
-        print(f"JSON parse error: {e}")
+    except ValueError as e:
+        print(f"Parsing error: {e}")
         return jsonify({
-            "success": True,
-            "disease": "Leaf Rust",
-            "confidence": 87,
-            "severity": "High",
-            "treatment": [
-                "Apply Mancozeb fungicide every 10-14 days.",
-                "Remove infected leaves immediately.",
-                "Avoid overhead irrigation.",
-                "Ensure proper plant spacing.",
-            ],
-            "prevention": [
-                "Use resistant seed varieties.",
-                "Rotate crops annually.",
-                "Monitor weekly.",
-                "Apply preventive fungicide before rainy season.",
-            ],
-        })
+            "success": False,
+            "error": "Could not get a valid analysis from the AI model. Please try again with a clearer image.",
+        }), 502
+
+    except requests.RequestException as e:
+        print(f"Image download error: {e}")
+        return jsonify({
+            "success": False,
+            "error": "Could not download the provided image.",
+        }), 400
+
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Unexpected error: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({
-            "success": True,
-            "disease": "Powdery Mildew",
-            "confidence": 82,
-            "severity": "Moderate",
-            "treatment": [
-                "Spray sulfur-based fungicide.",
-                "Remove heavily infected parts.",
-                "Improve air circulation.",
-                "Reduce nitrogen fertilizer.",
-            ],
-            "prevention": [
-                "Plant in ventilated areas.",
-                "Avoid excess nitrogen.",
-                "Use disease-resistant varieties.",
-                "Maintain proper spacing.",
-            ],
-        })
+            "success": False,
+            "error": "An unexpected error occurred during analysis.",
+        }), 500
 
 if __name__ == "__main__":
     app.run(port=8000, debug=True)
