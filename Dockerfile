@@ -1,4 +1,3 @@
-@"
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -11,4 +10,3 @@ COPY . .
 EXPOSE 5000
 
 CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
-"@ | Out-File -FilePath Dockerfile -Encoding utf8
